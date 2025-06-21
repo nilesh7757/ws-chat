@@ -12,8 +12,15 @@ connectDB();
 const app = express();
 app.use(cors());
 
-const server = app.listen(3001, () => {
-  console.log("✅ Server running");
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'WebSocket server is running' });
+});
+
+const PORT = process.env.PORT || 3001;
+
+const server = app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
 
 const wss = new WebSocketServer({ server });

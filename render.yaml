@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: ws-chat-server
+    env: node
+    buildCommand: npm install
+    startCommand: node index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: PORT
+        value: 10000 
