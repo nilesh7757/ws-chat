@@ -11,6 +11,7 @@ connectDB();
 
 const app = express();
 app.use(cors());
+app.use(express.json());
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -37,7 +38,7 @@ async function addContactForUser(userEmail, contactEmail) {
   try {
     // Get the current user
     const currentUser = await User.findOne({ email: userEmail });
-    if (!currentUser) return;
+    if (!currentUser) return false;
 
     // Get the contact user details
     const contactUser = await User.findOne({ email: contactEmail }).select('name email image');
@@ -64,9 +65,14 @@ async function addContactForUser(userEmail, contactEmail) {
       currentUser.contacts.push(contactData);
       await currentUser.save();
       console.log(`✅ Added ${contactEmail} to ${userEmail}'s contacts`);
+      return true;
+    } else {
+      console.log(`ℹ️ ${contactEmail} already exists in ${userEmail}'s contacts`);
+      return false;
     }
   } catch (error) {
     console.error(`❌ Error adding contact for ${userEmail}:`, error);
+    return false;
   }
 }
 
@@ -150,14 +156,34 @@ wss.on("connection", (socket) => {
         const client = clients.get(socket);
         const roomId = client.room;
 
+        console.log('💬 Received chat message:', { from: client.email, text: msg.text, hasFile: !!msg.file });
+
         // Save to DB
         const messageData = {
           roomId,
           from: client.email,
           text: msg.text,
         };
-        if (msg.file) messageData.file = msg.file;
+        if (msg.file) {
+          let fileObj = msg.file;
+          if (typeof fileObj === 'string') {
+            try {
+              fileObj = JSON.parse(fileObj);
+            } catch (e) {
+              fileObj = null;
+            }
+          }
+          if (fileObj && fileObj.url) {
+            messageData.file = fileObj;
+            console.log('📁 File data being saved:', messageData.file);
+          } else {
+            messageData.file = null;
+          }
+        } else {
+          messageData.file = null;
+        }
         const saved = await Message.create(messageData);
+        console.log('💾 Message saved to DB:', saved);
 
         const payloadData = {
           type: "chat",
@@ -165,7 +191,10 @@ wss.on("connection", (socket) => {
           text: msg.text,
           createdAt: saved.createdAt,
         };
-        if (msg.file) payloadData.file = msg.file;
+        if (msg.file) {
+          payloadData.file = msg.file;
+          console.log('📤 File data being sent in payload:', msg.file);
+        }
         const payload = JSON.stringify(payloadData);
 
         // Get the other user's email from the room
@@ -187,8 +216,8 @@ wss.on("connection", (socket) => {
         }
 
         // Automatically add contacts for both users
-        await addContactForUser(client.email, otherUserEmail);
-        await addContactForUser(otherUserEmail, client.email);
+        const senderContactAdded = await addContactForUser(client.email, otherUserEmail);
+        const receiverContactAdded = await addContactForUser(otherUserEmail, client.email);
 
         // Send notification to both users about contact addition
         const contactAddedPayload = JSON.stringify({
@@ -196,10 +225,18 @@ wss.on("connection", (socket) => {
           message: `Added ${otherUserEmail} to contacts`
         });
 
+        // Send the chat message first
+        console.log('📤 Broadcasting message to room:', roomId);
         for (let member of rooms.get(roomId)) {
           member.send(payload);
-          member.send(contactAddedPayload);
         }
+
+        // Then send contact addition notifications with a small delay
+        setTimeout(() => {
+          for (let member of rooms.get(roomId)) {
+            member.send(contactAddedPayload);
+          }
+        }, 100);
       }
     } catch (err) {
       console.error("❌ WS Error:", err);
@@ -225,4 +262,51 @@ wss.on("connection", (socket) => {
     
     clients.delete(socket);
   });
+});
+
+// Edit a message
+app.patch('/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email, text } = req.body;
+    if (!email || !text) {
+      return res.status(400).json({ error: 'Email and new text are required.' });
+    }
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found.' });
+    }
+    if (message.from !== email) {
+      return res.status(403).json({ error: 'You can only edit your own messages.' });
+    }
+    message.text = text;
+    await message.save();
+    return res.status(200).json({ success: true, message: 'Message updated.', data: message });
+  } catch (err) {
+    console.error('Error editing message:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
+});
+
+// Delete a message
+app.delete('/messages/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+    const message = await Message.findById(id);
+    if (!message) {
+      return res.status(404).json({ error: 'Message not found.' });
+    }
+    if (message.from !== email) {
+      return res.status(403).json({ error: 'You can only delete your own messages.' });
+    }
+    await message.deleteOne();
+    return res.status(200).json({ success: true, message: 'Message deleted.' });
+  } catch (err) {
+    console.error('Error deleting message:', err);
+    return res.status(500).json({ error: 'Internal server error.' });
+  }
 });
