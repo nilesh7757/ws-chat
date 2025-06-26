@@ -29,8 +29,51 @@ const clients = new Map(); // socket -> { email, room }
 const rooms = new Map();   // roomId -> Set<socket>
 const userSockets = new Map(); // email -> Set<socket>
 
+// Cleanup function to set all users offline on server restart
+async function cleanupOnStartup() {
+  try {
+    await User.updateMany({}, { $set: { isOnline: false } });
+    console.log('✅ Reset all users to offline status on startup');
+  } catch (error) {
+    console.error('❌ Error resetting user status on startup:', error);
+  }
+}
+
+// Call cleanup on startup
+cleanupOnStartup();
+
 function getRoomId(email1, email2) {
   return [email1, email2].sort().join('+');
+}
+
+// Function to update user online status
+async function updateUserOnlineStatus(email, isOnline) {
+  try {
+    const updateData = { isOnline };
+    if (!isOnline) {
+      updateData.lastSeen = new Date();
+    }
+    await User.updateOne({ email }, { $set: updateData });
+    console.log(`✅ Updated ${email} online status to: ${isOnline}`);
+  } catch (error) {
+    console.error(`❌ Error updating online status for ${email}:`, error);
+  }
+}
+
+// Function to broadcast status to all connected clients
+function broadcastStatus(email, isOnline) {
+  const statusPayload = JSON.stringify({ 
+    type: 'status', 
+    email, 
+    isOnline,
+    lastSeen: isOnline ? null : new Date().toISOString()
+  });
+  
+  wss.clients.forEach(client => {
+    if (client.readyState === 1) { // WebSocket.OPEN
+      client.send(statusPayload);
+    }
+  });
 }
 
 // Function to add contact for a user
@@ -143,7 +186,14 @@ wss.on("connection", (socket) => {
         if (!userSockets.has(self)) userSockets.set(self, new Set());
         userSockets.get(self).add(socket);
 
-        console.log(`✅ ${self} joined ${roomId}`);
+        // Set user as online in DB (only if this is their first connection)
+        const userSocketSet = userSockets.get(self);
+        if (userSocketSet.size === 1) {
+          await updateUserOnlineStatus(self, true);
+          broadcastStatus(self, true);
+        }
+
+        console.log(`✅ ${self} joined ${roomId} (total connections: ${userSocketSet.size})`);
 
         // Send chat history
         const history = await Message.find({ roomId }).sort({ createdAt: 1 });
@@ -243,24 +293,35 @@ wss.on("connection", (socket) => {
     }
   });
 
-  socket.on("close", () => {
+  socket.on("close", async () => {
     const info = clients.get(socket);
-    if (info && rooms.has(info.room)) {
-      rooms.get(info.room).delete(socket);
-    }
-    
-    // Remove socket from userSockets tracking
     if (info) {
+      // Remove from room
+      if (rooms.has(info.room)) {
+        rooms.get(info.room).delete(socket);
+      }
+      
+      // Remove socket from userSockets tracking
       const userSocketSet = userSockets.get(info.email);
       if (userSocketSet) {
         userSocketSet.delete(socket);
+        console.log(`🔌 ${info.email} disconnected (remaining connections: ${userSocketSet.size})`);
+        
+        // If this was the last connection for this user, set them offline
         if (userSocketSet.size === 0) {
           userSockets.delete(info.email);
+          await updateUserOnlineStatus(info.email, false);
+          broadcastStatus(info.email, false);
+          console.log(`📴 ${info.email} is now offline (no more connections)`);
         }
       }
     }
-    
     clients.delete(socket);
+  });
+
+  // Handle connection errors
+  socket.on("error", (error) => {
+    console.error("❌ WebSocket error:", error);
   });
 });
 

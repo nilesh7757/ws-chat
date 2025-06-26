@@ -13,6 +13,8 @@ const userSchema = new mongoose.Schema({
   password: String,
   image: String, // profile picture
   contacts: [contactSchema], // user's contact list
+  isOnline: { type: Boolean, default: false }, // online status
+  lastSeen: { type: Date }, // last seen timestamp
 }, { timestamps: true });
 
 module.exports = mongoose.model('User', userSchema); 
