@@ -232,6 +232,7 @@ wss.on("connection", (socket) => {
         } else {
           messageData.file = null;
         }
+        messageData.status = 'sent';
         const saved = await Message.create(messageData);
         console.log('💾 Message saved to DB:', saved);
 
@@ -240,6 +241,7 @@ wss.on("connection", (socket) => {
           from: client.email,
           text: msg.text,
           createdAt: saved.createdAt,
+          status: saved.status,
         };
         if (msg.file) {
           payloadData.file = msg.file;
@@ -288,6 +290,47 @@ wss.on("connection", (socket) => {
           }
         }, 100);
       }
+
+      // NEW: Handle delivered tick
+      if (msg.type === "delivered") {
+        // msg: { type: 'delivered', messageId }
+        const message = await Message.findById(msg.messageId);
+        if (message && message.status !== 'delivered' && message.status !== 'seen') {
+          message.status = 'delivered';
+          await message.save();
+          // Notify sender
+          const senderSockets = userSockets.get(message.from);
+          if (senderSockets) {
+            senderSockets.forEach(s => {
+              if (s.readyState === 1) {
+                s.send(JSON.stringify({ type: 'status_update', messageId: message._id, status: 'delivered' }));
+              }
+            });
+          }
+        }
+        return;
+      }
+
+      // NEW: Handle seen tick
+      if (msg.type === "seen") {
+        // msg: { type: 'seen', messageId }
+        const message = await Message.findById(msg.messageId);
+        if (message && message.status !== 'seen') {
+          message.status = 'seen';
+          await message.save();
+          // Notify sender
+          const senderSockets = userSockets.get(message.from);
+          if (senderSockets) {
+            senderSockets.forEach(s => {
+              if (s.readyState === 1) {
+                s.send(JSON.stringify({ type: 'status_update', messageId: message._id, status: 'seen' }));
+              }
+            });
+          }
+        }
+        return;
+      }
+
     } catch (err) {
       console.error("❌ WS Error:", err);
     }

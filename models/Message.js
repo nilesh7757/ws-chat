@@ -13,6 +13,7 @@ const MessageSchema = new mongoose.Schema({
   text: String,
   file: FileSchema,
   createdAt: { type: Date, default: Date.now },
+  status: { type: String, enum: ['sent', 'delivered', 'seen'], default: 'sent' },
 });
 
 module.exports = mongoose.model('Message', MessageSchema);
