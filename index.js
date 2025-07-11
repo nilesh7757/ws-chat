@@ -18,6 +18,10 @@ app.get('/health', (req, res) => {
   res.status(200).json({ status: 'OK', message: 'WebSocket server is running' });
 });
 
+app.get('/healthz', (req, res) => {
+  res.status(200).send('OK');
+});
+
 const PORT = process.env.PORT || 3001;
 
 const server = app.listen(PORT, () => {
