@@ -5,6 +5,7 @@ const dotenv = require("dotenv");
 const { connectDB } = require("./lib/db");
 const Message = require("./models/Message");
 const User = require("./models/User");
+const compression = require('compression');
 
 dotenv.config();
 connectDB();
@@ -12,6 +13,7 @@ connectDB();
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(compression());
 
 // Health check endpoint
 app.get('/health', (req, res) => {
