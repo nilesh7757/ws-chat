@@ -1,422 +1,432 @@
-const express = require("express");
-const { WebSocketServer } = require("ws");
-const cors = require("cors");
-const dotenv = require("dotenv");
-const { connectDB } = require("./lib/db");
-const Message = require("./models/Message");
-const User = require("./models/User");
-const compression = require('compression');
+const express = require("express")
+const { WebSocketServer } = require("ws")
+const cors = require("cors")
+const dotenv = require("dotenv")
+const { connectDB } = require("./lib/db")
+const Message = require("./models/Message")
+const User = require("./models/User")
+const compression = require("compression")
 
-dotenv.config();
-connectDB();
+dotenv.config()
+connectDB()
 
-const app = express();
-app.use(cors());
-app.use(express.json());
-app.use(compression());
+const app = express()
+app.use(cors())
+app.use(express.json())
+app.use(compression())
 
 // Health check endpoint
-app.get('/health', (req, res) => {
-  res.status(200).json({ status: 'OK', message: 'WebSocket server is running' });
-});
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "OK", message: "WebSocket server is running" })
+})
 
-app.get('/healthz', (req, res) => {
-  res.status(200).send('OK');
-});
+app.get("/healthz", (req, res) => {
+  res.status(200).send("OK")
+})
 
-const PORT = process.env.PORT || 3001;
-
+const PORT = process.env.PORT || 3001
 const server = app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
-});
+  console.log(`✅ Server running on port ${PORT}`)
+})
 
-const wss = new WebSocketServer({ server });
-const clients = new Map(); // socket -> { email, room }
-const rooms = new Map();   // roomId -> Set<socket>
-const userSockets = new Map(); // email -> Set<socket>
+const wss = new WebSocketServer({ server })
+const clients = new Map() // socket -> { email, room }
+const rooms = new Map() // roomId -> Set<socket>
+const userSockets = new Map() // email -> Set<socket>
 
 // Cleanup function to set all users offline on server restart
 async function cleanupOnStartup() {
   try {
-    await User.updateMany({}, { $set: { isOnline: false } });
-    console.log('✅ Reset all users to offline status on startup');
+    await User.updateMany({}, { $set: { isOnline: false } })
+    console.log("✅ Reset all users to offline status on startup")
   } catch (error) {
-    console.error('❌ Error resetting user status on startup:', error);
+    console.error("❌ Error resetting user status on startup:", error)
   }
 }
 
 // Call cleanup on startup
-cleanupOnStartup();
+cleanupOnStartup()
 
 function getRoomId(email1, email2) {
-  return [email1, email2].sort().join('+');
+  return [email1, email2].sort().join("+")
 }
 
 // Function to update user online status
 async function updateUserOnlineStatus(email, isOnline) {
   try {
-    const updateData = { isOnline };
+    const updateData = { isOnline }
     if (!isOnline) {
-      updateData.lastSeen = new Date();
+      updateData.lastSeen = new Date()
     }
-    await User.updateOne({ email }, { $set: updateData });
-    console.log(`✅ Updated ${email} online status to: ${isOnline}`);
+    await User.updateOne({ email }, { $set: updateData })
+    console.log(`✅ Updated ${email} online status to: ${isOnline}`)
   } catch (error) {
-    console.error(`❌ Error updating online status for ${email}:`, error);
+    console.error(`❌ Error updating online status for ${email}:`, error)
   }
 }
 
 // Function to broadcast status to all connected clients
 function broadcastStatus(email, isOnline) {
-  const statusPayload = JSON.stringify({ 
-    type: 'status', 
-    email, 
+  const statusPayload = JSON.stringify({
+    type: "status",
+    email,
     isOnline,
-    lastSeen: isOnline ? null : new Date().toISOString()
-  });
-  
-  wss.clients.forEach(client => {
-    if (client.readyState === 1) { // WebSocket.OPEN
-      client.send(statusPayload);
+    lastSeen: isOnline ? null : new Date().toISOString(),
+  })
+
+  wss.clients.forEach((client) => {
+    if (client.readyState === 1) {
+      // WebSocket.OPEN
+      client.send(statusPayload)
     }
-  });
+  })
 }
 
 // Function to add contact for a user
 async function addContactForUser(userEmail, contactEmail) {
   try {
     // Get the current user
-    const currentUser = await User.findOne({ email: userEmail });
-    if (!currentUser) return false;
+    const currentUser = await User.findOne({ email: userEmail })
+    if (!currentUser) return false
 
     // Get the contact user details
-    const contactUser = await User.findOne({ email: contactEmail }).select('name email image');
-    
+    const contactUser = await User.findOne({ email: contactEmail }).select("name email image")
+
     // Prepare contact data
     const contactData = {
       email: contactEmail,
-      name: contactUser?.name || contactEmail.split('@')[0],
+      name: contactUser?.name || contactEmail.split("@")[0],
       image: contactUser?.image || null,
-      found: !!contactUser
-    };
+      found: !!contactUser,
+    }
 
     // Initialize contacts array if it doesn't exist
     if (!currentUser.contacts) {
-      currentUser.contacts = [];
+      currentUser.contacts = []
     }
 
     // Check if contact already exists
-    const contactExists = currentUser.contacts.some(
-      (contact) => contact.email === contactEmail
-    );
+    const contactExists = currentUser.contacts.some((contact) => contact.email === contactEmail)
 
     if (!contactExists) {
-      currentUser.contacts.push(contactData);
-      await currentUser.save();
-      console.log(`✅ Added ${contactEmail} to ${userEmail}'s contacts`);
-      return true;
+      currentUser.contacts.push(contactData)
+      await currentUser.save()
+      console.log(`✅ Added ${contactEmail} to ${userEmail}'s contacts`)
+      return true
     } else {
-      console.log(`ℹ️ ${contactEmail} already exists in ${userEmail}'s contacts`);
-      return false;
+      console.log(`ℹ️ ${contactEmail} already exists in ${userEmail}'s contacts`)
+      return false
     }
   } catch (error) {
-    console.error(`❌ Error adding contact for ${userEmail}:`, error);
-    return false;
+    console.error(`❌ Error adding contact for ${userEmail}:`, error)
+    return false
   }
 }
 
 // Function to check if a user is in another user's contact list
 async function isInContactList(userEmail, contactEmail) {
   try {
-    const user = await User.findOne({ email: userEmail });
-    if (!user || !user.contacts) return false;
-    
-    return user.contacts.some(contact => contact.email === contactEmail);
+    const user = await User.findOne({ email: userEmail })
+    if (!user || !user.contacts) return false
+
+    return user.contacts.some((contact) => contact.email === contactEmail)
   } catch (error) {
-    console.error(`❌ Error checking contact list for ${userEmail}:`, error);
-    return false;
+    console.error(`❌ Error checking contact list for ${userEmail}:`, error)
+    return false
   }
 }
 
 // Function to send notification about new message from unknown user
 async function notifyUnknownMessage(recipientEmail, senderEmail, messageText) {
   try {
-    console.log(`🔔 Sending unknown message notification to ${recipientEmail} from ${senderEmail}`);
-    const senderUser = await User.findOne({ email: senderEmail }).select('name email image');
-    const senderName = senderUser?.name || senderEmail.split('@')[0];
-    
+    console.log(`🔔 Sending unknown message notification to ${recipientEmail} from ${senderEmail}`)
+    const senderUser = await User.findOne({ email: senderEmail }).select("name email image")
+    const senderName = senderUser?.name || senderEmail.split("@")[0]
+
     const notificationPayload = JSON.stringify({
       type: "unknown_message",
       from: senderEmail,
       fromName: senderName,
       fromImage: senderUser?.image || null,
       text: messageText,
-      timestamp: new Date().toISOString()
-    });
+      timestamp: new Date().toISOString(),
+    })
 
     // Send to all sockets of the recipient
-    const recipientSockets = userSockets.get(recipientEmail);
+    const recipientSockets = userSockets.get(recipientEmail)
     if (recipientSockets) {
-      console.log(`📤 Found ${recipientSockets.size} sockets for ${recipientEmail}`);
-      recipientSockets.forEach(socket => {
-        if (socket.readyState === 1) { // WebSocket.OPEN
-          socket.send(notificationPayload);
-          console.log(`✅ Sent unknown message notification to ${recipientEmail}`);
+      console.log(`📤 Found ${recipientSockets.size} sockets for ${recipientEmail}`)
+      recipientSockets.forEach((socket) => {
+        if (socket.readyState === 1) {
+          // WebSocket.OPEN
+          socket.send(notificationPayload)
+          console.log(`✅ Sent unknown message notification to ${recipientEmail}`)
         } else {
-          console.log(`❌ Socket not ready for ${recipientEmail}, state: ${socket.readyState}`);
+          console.log(`❌ Socket not ready for ${recipientEmail}, state: ${socket.readyState}`)
         }
-      });
+      })
     } else {
-      console.log(`❌ No sockets found for ${recipientEmail}`);
+      console.log(`❌ No sockets found for ${recipientEmail}`)
     }
   } catch (error) {
-    console.error(`❌ Error sending unknown message notification:`, error);
+    console.error(`❌ Error sending unknown message notification:`, error)
   }
+}
+
+// FIXED: Function to filter messages based on deletion status
+function filterMessagesForUser(messages, userEmail) {
+  return messages.filter((message) => {
+    // Hide messages deleted for all
+    if (message.deletedForAll) {
+      return false
+    }
+
+    // Hide messages deleted for this specific user
+    if (message.deletedFor && Array.isArray(message.deletedFor) && message.deletedFor.includes(userEmail)) {
+      return false
+    }
+
+    return true
+  })
 }
 
 wss.on("connection", (socket) => {
   socket.on("message", async (data) => {
     try {
-      const msg = JSON.parse(data);
+      const msg = JSON.parse(data)
 
       // STEP 1: Join Room
       if (msg.type === "join") {
-        const { self, target } = msg;
-        const roomId = getRoomId(self, target);
-        clients.set(socket, { email: self, room: roomId });
+        const { self, target } = msg
+        const roomId = getRoomId(self, target)
+        clients.set(socket, { email: self, room: roomId })
 
-        if (!rooms.has(roomId)) rooms.set(roomId, new Set());
-        rooms.get(roomId).add(socket);
+        if (!rooms.has(roomId)) rooms.set(roomId, new Set())
+        rooms.get(roomId).add(socket)
 
         // Track user sockets for notifications
-        if (!userSockets.has(self)) userSockets.set(self, new Set());
-        userSockets.get(self).add(socket);
+        if (!userSockets.has(self)) userSockets.set(self, new Set())
+        userSockets.get(self).add(socket)
 
         // Set user as online in DB (only if this is their first connection)
-        const userSocketSet = userSockets.get(self);
+        const userSocketSet = userSockets.get(self)
         if (userSocketSet.size === 1) {
-          await updateUserOnlineStatus(self, true);
-          broadcastStatus(self, true);
+          await updateUserOnlineStatus(self, true)
+          broadcastStatus(self, true)
         }
 
-        console.log(`✅ ${self} joined ${roomId} (total connections: ${userSocketSet.size})`);
+        console.log(`✅ ${self} joined ${roomId} (total connections: ${userSocketSet.size})`)
 
-        // Send chat history
-        const history = await Message.find({ roomId }).sort({ createdAt: 1 });
-        socket.send(JSON.stringify({ type: 'history', messages: history }));
-        return;
+        // FIXED: Send filtered chat history
+        const history = await Message.find({ roomId }).sort({ createdAt: 1 })
+        const filteredHistory = filterMessagesForUser(history, self)
+
+        socket.send(
+          JSON.stringify({
+            type: "history",
+            messages: filteredHistory.map((m) => ({
+              _id: m._id,
+              from: m.from,
+              text: m.text,
+              file: m.file,
+              createdAt: m.createdAt,
+              status: m.status,
+              edited: m.edited,
+              editedAt: m.editedAt,
+              deleted: m.deleted,
+              deletedAt: m.deletedAt,
+              deletedFor: m.deletedFor,
+              deletedForAll: m.deletedForAll,
+            })),
+          }),
+        )
+
+        return
       }
 
       // STEP 2: Send message
       if (msg.type === "chat") {
-        const client = clients.get(socket);
-        const roomId = client.room;
-
-        console.log('💬 Received chat message:', { from: client.email, text: msg.text, hasFile: !!msg.file });
+        const client = clients.get(socket)
+        const roomId = client.room
+        console.log("💬 Received chat message:", { from: client.email, text: msg.text, hasFile: !!msg.file })
 
         // Save to DB
         const messageData = {
           roomId,
           from: client.email,
           text: msg.text,
-        };
+          deletedFor: [], // Initialize as empty array
+          deletedForAll: false, // Initialize as false
+        }
+
         if (msg.file) {
-          let fileObj = msg.file;
-          if (typeof fileObj === 'string') {
+          let fileObj = msg.file
+          if (typeof fileObj === "string") {
             try {
-              fileObj = JSON.parse(fileObj);
+              fileObj = JSON.parse(fileObj)
             } catch (e) {
-              fileObj = null;
+              fileObj = null
             }
           }
           if (fileObj && fileObj.url) {
-            messageData.file = fileObj;
-            console.log('📁 File data being saved:', messageData.file);
+            messageData.file = fileObj
+            console.log("📁 File data being saved:", messageData.file)
           } else {
-            messageData.file = null;
+            messageData.file = null
           }
         } else {
-          messageData.file = null;
+          messageData.file = null
         }
-        messageData.status = 'sent';
-        const saved = await Message.create(messageData);
-        console.log('💾 Message saved to DB:', saved);
+
+        messageData.status = "sent"
+        const saved = await Message.create(messageData)
+        console.log("💾 Message saved to DB:", saved)
 
         const payloadData = {
           type: "chat",
+          _id: saved._id,
           from: client.email,
           text: msg.text,
           createdAt: saved.createdAt,
           status: saved.status,
-        };
-        if (msg.file) {
-          payloadData.file = msg.file;
-          console.log('📤 File data being sent in payload:', msg.file);
         }
-        const payload = JSON.stringify(payloadData);
+
+        if (msg.file) {
+          payloadData.file = msg.file
+          console.log("📤 File data being sent in payload:", msg.file)
+        }
+
+        const payload = JSON.stringify(payloadData)
 
         // Get the other user's email from the room
-        const [email1, email2] = roomId.split('+');
-        const otherUserEmail = client.email === email1 ? email2 : email1;
-
-        console.log(`💬 Message from ${client.email} to ${otherUserEmail}`);
+        const [email1, email2] = roomId.split("+")
+        const otherUserEmail = client.email === email1 ? email2 : email1
+        console.log(`💬 Message from ${client.email} to ${otherUserEmail}`)
 
         // Check if the recipient has the sender in their contact list
-        const isContact = await isInContactList(otherUserEmail, client.email);
-        console.log(`👥 Is ${client.email} in ${otherUserEmail}'s contacts? ${isContact}`);
+        const isContact = await isInContactList(otherUserEmail, client.email)
+        console.log(`👥 Is ${client.email} in ${otherUserEmail}'s contacts? ${isContact}`)
 
         // If not in contact list, send notification about unknown message
         if (!isContact) {
-          console.log(`🚨 ${client.email} is NOT in ${otherUserEmail}'s contacts, sending unknown message notification`);
-          await notifyUnknownMessage(otherUserEmail, client.email, msg.text);
+          console.log(`🚨 ${client.email} is NOT in ${otherUserEmail}'s contacts, sending unknown message notification`)
+          await notifyUnknownMessage(otherUserEmail, client.email, msg.text)
         } else {
-          console.log(`✅ ${client.email} is already in ${otherUserEmail}'s contacts`);
+          console.log(`✅ ${client.email} is already in ${otherUserEmail}'s contacts`)
         }
 
         // Automatically add contacts for both users
-        const senderContactAdded = await addContactForUser(client.email, otherUserEmail);
-        const receiverContactAdded = await addContactForUser(otherUserEmail, client.email);
+        const senderContactAdded = await addContactForUser(client.email, otherUserEmail)
+        const receiverContactAdded = await addContactForUser(otherUserEmail, client.email)
 
         // Send notification to both users about contact addition
         const contactAddedPayload = JSON.stringify({
           type: "contact_added",
-          message: `Added ${otherUserEmail} to contacts`
-        });
+          message: `Added ${otherUserEmail} to contacts`,
+        })
 
         // Send the chat message first
-        console.log('📤 Broadcasting message to room:', roomId);
-        for (let member of rooms.get(roomId)) {
-          member.send(payload);
+        console.log("📤 Broadcasting message to room:", roomId)
+        for (const member of rooms.get(roomId)) {
+          member.send(payload)
         }
 
         // Then send contact addition notifications with a small delay
         setTimeout(() => {
-          for (let member of rooms.get(roomId)) {
-            member.send(contactAddedPayload);
+          for (const member of rooms.get(roomId)) {
+            member.send(contactAddedPayload)
           }
-        }, 100);
+        }, 100)
       }
 
-      // NEW: Handle delivered tick
+      // Handle delivered tick
       if (msg.type === "delivered") {
-        // msg: { type: 'delivered', messageId }
-        const message = await Message.findById(msg.messageId);
-        if (message && message.status !== 'delivered' && message.status !== 'seen') {
-          message.status = 'delivered';
-          await message.save();
+        const message = await Message.findById(msg.messageId)
+        if (message && message.status !== "delivered" && message.status !== "seen") {
+          message.status = "delivered"
+          await message.save()
+
           // Notify sender
-          const senderSockets = userSockets.get(message.from);
+          const senderSockets = userSockets.get(message.from)
           if (senderSockets) {
-            senderSockets.forEach(s => {
+            senderSockets.forEach((s) => {
               if (s.readyState === 1) {
-                s.send(JSON.stringify({ type: 'status_update', messageId: message._id, status: 'delivered' }));
+                s.send(JSON.stringify({ type: "status_update", messageId: message._id, status: "delivered" }))
               }
-            });
+            })
           }
         }
-        return;
+        return
       }
 
-      // NEW: Handle seen tick
+      // Handle seen tick
       if (msg.type === "seen") {
-        // msg: { type: 'seen', messageId }
-        const message = await Message.findById(msg.messageId);
-        if (message && message.status !== 'seen') {
-          message.status = 'seen';
-          await message.save();
+        const message = await Message.findById(msg.messageId)
+        if (message && message.status !== "seen") {
+          message.status = "seen"
+          await message.save()
+
           // Notify sender
-          const senderSockets = userSockets.get(message.from);
+          const senderSockets = userSockets.get(message.from)
           if (senderSockets) {
-            senderSockets.forEach(s => {
+            senderSockets.forEach((s) => {
               if (s.readyState === 1) {
-                s.send(JSON.stringify({ type: 'status_update', messageId: message._id, status: 'seen' }));
+                s.send(JSON.stringify({ type: "status_update", messageId: message._id, status: "seen" }))
               }
-            });
+            })
           }
+        }
+        return
+      }
+
+      // Handle delete for me (real-time UI update)
+      if (msg.type === "delete_for_me") {
+        // msg: { type: 'delete_for_me', messageId: string, userEmail: string }
+        const { messageId, userEmail } = msg;
+        // Notify all sockets for this user
+        const userSocketSet = userSockets.get(userEmail);
+        if (userSocketSet) {
+          userSocketSet.forEach((s) => {
+            if (s.readyState === 1) {
+              s.send(JSON.stringify({ type: "delete_for_me", messageId }));
+            }
+          });
         }
         return;
       }
-
     } catch (err) {
-      console.error("❌ WS Error:", err);
+      console.error("❌ WS Error:", err)
     }
-  });
+  })
 
   socket.on("close", async () => {
-    const info = clients.get(socket);
+    const info = clients.get(socket)
     if (info) {
       // Remove from room
       if (rooms.has(info.room)) {
-        rooms.get(info.room).delete(socket);
+        rooms.get(info.room).delete(socket)
       }
-      
+
       // Remove socket from userSockets tracking
-      const userSocketSet = userSockets.get(info.email);
+      const userSocketSet = userSockets.get(info.email)
       if (userSocketSet) {
-        userSocketSet.delete(socket);
-        console.log(`🔌 ${info.email} disconnected (remaining connections: ${userSocketSet.size})`);
-        
+        userSocketSet.delete(socket)
+        console.log(`🔌 ${info.email} disconnected (remaining connections: ${userSocketSet.size})`)
+
         // If this was the last connection for this user, set them offline
         if (userSocketSet.size === 0) {
-          userSockets.delete(info.email);
-          await updateUserOnlineStatus(info.email, false);
-          broadcastStatus(info.email, false);
-          console.log(`📴 ${info.email} is now offline (no more connections)`);
+          userSockets.delete(info.email)
+          await updateUserOnlineStatus(info.email, false)
+          broadcastStatus(info.email, false)
+          console.log(`📴 ${info.email} is now offline (no more connections)`)
         }
       }
     }
-    clients.delete(socket);
-  });
+    clients.delete(socket)
+  })
 
   // Handle connection errors
   socket.on("error", (error) => {
-    console.error("❌ WebSocket error:", error);
-  });
-});
-
-// Edit a message
-app.patch('/messages/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { email, text } = req.body;
-    if (!email || !text) {
-      return res.status(400).json({ error: 'Email and new text are required.' });
-    }
-    const message = await Message.findById(id);
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found.' });
-    }
-    if (message.from !== email) {
-      return res.status(403).json({ error: 'You can only edit your own messages.' });
-    }
-    message.text = text;
-    await message.save();
-    return res.status(200).json({ success: true, message: 'Message updated.', data: message });
-  } catch (err) {
-    console.error('Error editing message:', err);
-    return res.status(500).json({ error: 'Internal server error.' });
-  }
-});
-
-// Delete a message
-app.delete('/messages/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { email } = req.body;
-    if (!email) {
-      return res.status(400).json({ error: 'Email is required.' });
-    }
-    const message = await Message.findById(id);
-    if (!message) {
-      return res.status(404).json({ error: 'Message not found.' });
-    }
-    if (message.from !== email) {
-      return res.status(403).json({ error: 'You can only delete your own messages.' });
-    }
-    await message.deleteOne();
-    return res.status(200).json({ success: true, message: 'Message deleted.' });
-  } catch (err) {
-    console.error('Error deleting message:', err);
-    return res.status(500).json({ error: 'Internal server error.' });
-  }
-});
+    console.error("❌ WebSocket error:", error)
+  })
+})
