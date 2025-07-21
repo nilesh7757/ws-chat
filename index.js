@@ -6,6 +6,12 @@ const { connectDB } = require("./lib/db")
 const Message = require("./models/Message")
 const User = require("./models/User")
 const compression = require("compression")
+const {
+  WS_MESSAGE_TYPES,
+  MESSAGE_STATUS,
+  DEFAULT_CONTACT_ADDED_DELAY,
+  DEFAULT_PORT,
+} = require("./constants")
 
 dotenv.config()
 connectDB()
@@ -24,7 +30,9 @@ app.get("/healthz", (req, res) => {
   res.status(200).send("OK")
 })
 
-const PORT = process.env.PORT || 3001
+// Use Railway's provided port or fallback to DEFAULT_PORT
+const PORT = process.env.PORT || DEFAULT_PORT;
+
 const server = app.listen(PORT, () => {
   console.log(`✅ Server running on port ${PORT}`)
 })
@@ -68,7 +76,7 @@ async function updateUserOnlineStatus(email, isOnline) {
 // Function to broadcast status to all connected clients
 function broadcastStatus(email, isOnline) {
   const statusPayload = JSON.stringify({
-    type: "status",
+    type: WS_MESSAGE_TYPES.STATUS,
     email,
     isOnline,
     lastSeen: isOnline ? null : new Date().toISOString(),
@@ -144,7 +152,7 @@ async function notifyUnknownMessage(recipientEmail, senderEmail, messageText) {
     const senderName = senderUser?.name || senderEmail.split("@")[0]
 
     const notificationPayload = JSON.stringify({
-      type: "unknown_message",
+      type: WS_MESSAGE_TYPES.UNKNOWN_MESSAGE,
       from: senderEmail,
       fromName: senderName,
       fromImage: senderUser?.image || null,
@@ -196,7 +204,7 @@ wss.on("connection", (socket) => {
       const msg = JSON.parse(data)
 
       // STEP 1: Join Room
-      if (msg.type === "join") {
+      if (msg.type === WS_MESSAGE_TYPES.JOIN) {
         const { self, target } = msg
         const roomId = getRoomId(self, target)
         clients.set(socket, { email: self, room: roomId })
@@ -223,7 +231,7 @@ wss.on("connection", (socket) => {
 
         socket.send(
           JSON.stringify({
-            type: "history",
+            type: WS_MESSAGE_TYPES.HISTORY,
             messages: filteredHistory.map((m) => ({
               _id: m._id,
               from: m.from,
@@ -245,7 +253,7 @@ wss.on("connection", (socket) => {
       }
 
       // STEP 2: Send message
-      if (msg.type === "chat") {
+      if (msg.type === WS_MESSAGE_TYPES.CHAT) {
         const client = clients.get(socket)
         const roomId = client.room
         console.log("💬 Received chat message:", { from: client.email, text: msg.text, hasFile: !!msg.file })
@@ -278,12 +286,12 @@ wss.on("connection", (socket) => {
           messageData.file = null
         }
 
-        messageData.status = "sent"
+        messageData.status = MESSAGE_STATUS.SENT
         const saved = await Message.create(messageData)
         console.log("💾 Message saved to DB:", saved)
 
         const payloadData = {
-          type: "chat",
+          type: WS_MESSAGE_TYPES.CHAT,
           _id: saved._id,
           from: client.email,
           text: msg.text,
@@ -321,7 +329,7 @@ wss.on("connection", (socket) => {
 
         // Send notification to both users about contact addition
         const contactAddedPayload = JSON.stringify({
-          type: "contact_added",
+          type: WS_MESSAGE_TYPES.CONTACT_ADDED,
           message: `Added ${otherUserEmail} to contacts`,
         })
 
@@ -336,14 +344,14 @@ wss.on("connection", (socket) => {
           for (const member of rooms.get(roomId)) {
             member.send(contactAddedPayload)
           }
-        }, 100)
+        }, DEFAULT_CONTACT_ADDED_DELAY)
       }
 
       // Handle delivered tick
-      if (msg.type === "delivered") {
+      if (msg.type === WS_MESSAGE_TYPES.DELIVERED) {
         const message = await Message.findById(msg.messageId)
-        if (message && message.status !== "delivered" && message.status !== "seen") {
-          message.status = "delivered"
+        if (message && message.status !== MESSAGE_STATUS.DELIVERED && message.status !== MESSAGE_STATUS.SEEN) {
+          message.status = MESSAGE_STATUS.DELIVERED
           await message.save()
 
           // Notify sender
@@ -351,7 +359,7 @@ wss.on("connection", (socket) => {
           if (senderSockets) {
             senderSockets.forEach((s) => {
               if (s.readyState === 1) {
-                s.send(JSON.stringify({ type: "status_update", messageId: message._id, status: "delivered" }))
+                s.send(JSON.stringify({ type: WS_MESSAGE_TYPES.STATUS_UPDATE, messageId: message._id, status: MESSAGE_STATUS.DELIVERED }))
               }
             })
           }
@@ -360,10 +368,10 @@ wss.on("connection", (socket) => {
       }
 
       // Handle seen tick
-      if (msg.type === "seen") {
+      if (msg.type === WS_MESSAGE_TYPES.SEEN) {
         const message = await Message.findById(msg.messageId)
-        if (message && message.status !== "seen") {
-          message.status = "seen"
+        if (message && message.status !== MESSAGE_STATUS.SEEN) {
+          message.status = MESSAGE_STATUS.SEEN
           await message.save()
 
           // Notify sender
@@ -371,7 +379,7 @@ wss.on("connection", (socket) => {
           if (senderSockets) {
             senderSockets.forEach((s) => {
               if (s.readyState === 1) {
-                s.send(JSON.stringify({ type: "status_update", messageId: message._id, status: "seen" }))
+                s.send(JSON.stringify({ type: WS_MESSAGE_TYPES.STATUS_UPDATE, messageId: message._id, status: MESSAGE_STATUS.SEEN }))
               }
             })
           }
@@ -380,7 +388,7 @@ wss.on("connection", (socket) => {
       }
 
       // Handle delete for me (real-time UI update)
-      if (msg.type === "delete_for_me") {
+      if (msg.type === WS_MESSAGE_TYPES.DELETE_FOR_ME) {
         // msg: { type: 'delete_for_me', messageId: string, userEmail: string }
         const { messageId, userEmail } = msg;
         // Notify all sockets for this user
@@ -388,7 +396,7 @@ wss.on("connection", (socket) => {
         if (userSocketSet) {
           userSocketSet.forEach((s) => {
             if (s.readyState === 1) {
-              s.send(JSON.stringify({ type: "delete_for_me", messageId }));
+              s.send(JSON.stringify({ type: WS_MESSAGE_TYPES.DELETE_FOR_ME, messageId }));
             }
           });
         }
